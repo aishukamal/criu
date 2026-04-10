@@ -1121,15 +1121,47 @@ int amdgpu_id_for_handle(int handle)
 	return -1;
 }
 
+static int load_img(char *filename, unsigned char **out_buf, size_t *out_len)
+{
+	unsigned char *buf;
+	FILE *img_fp;
+	size_t len;
+	int ret;
+
+	img_fp = open_img_file(filename, false, &len, true);
+	if (!img_fp) {
+		ret = -ENOENT;
+		goto out;
+	}
+
+	buf = xmalloc(len);
+	if (!buf) {
+		ret = -ENOMEM;
+		goto out_close;
+	}
+
+	ret = read_fp(img_fp, buf, len);
+	if (ret) {
+		xfree(buf);
+	} else {
+		*out_buf = buf;
+		*out_len = len;
+	}
+
+out_close:
+	fclose(img_fp);
+out:
+	if (ret < 0)
+		pr_err("Unable to read from %s", filename);
+
+	return ret;
+}
+
 int amdgpu_restore_init(void)
 {
 	if (!shared_memory) {
 		int protection = PROT_READ | PROT_WRITE;
 		int visibility = MAP_SHARED | MAP_ANONYMOUS;
-		size_t img_size;
-		FILE *img_fp = NULL;
-		int ret;
-		unsigned char *buf;
 		int num_handles = 0;
 		CriuRenderNode *rd = NULL;
 		CriuKfd *e = NULL;
@@ -1139,51 +1171,29 @@ int amdgpu_restore_init(void)
 		d = opendir(".");
 		if (d) {
 			while ((dir = readdir(d)) != NULL) {
+				unsigned char *buf;
+				size_t img_size;
+				int ret;
+
 				if (strncmp("amdgpu-kfd-", dir->d_name, strlen("amdgpu-kfd-")) == 0) {
-					img_fp = open_img_file(dir->d_name, false, &img_size, true);
-					if (!img_fp)
-						return -EINVAL;
-
-					buf = xmalloc(img_size);
-					if (!buf) {
-						fclose(img_fp);
-						return -ENOMEM;
-					}
-
-					ret = read_fp(img_fp, buf, img_size);
-					if (ret) {
-						pr_perror("Unable to read from %s", dir->d_name);
-						fclose(img_fp);
-						xfree(buf);
+					ret = load_img(dir->d_name, &buf, &img_size);
+					if (ret < 0) {
+						closedir(d);
 						return ret;
 					}
 
-					fclose(img_fp);
 					e = criu_kfd__unpack(NULL, img_size, buf);
 					num_handles += e->num_of_bos;
 					criu_kfd__free_unpacked(e, NULL);
 					xfree(buf);
 				}
 				if (strncmp("amdgpu-renderD-", dir->d_name, strlen("amdgpu-renderD-")) == 0) {
-					img_fp = open_img_file(dir->d_name, false, &img_size, true);
-					if (!img_fp)
-						return -EINVAL;
-
-					buf = xmalloc(img_size);
-					if (!buf) {
-						fclose(img_fp);
-						return -ENOMEM;
-					}
-
-					ret = read_fp(img_fp, buf, img_size);
-					if (ret) {
-						pr_perror("Unable to read from %s", dir->d_name);
-						fclose(img_fp);
-						xfree(buf);
+					ret = load_img(dir->d_name, &buf, &img_size);
+					if (ret < 0) {
+						closedir(d);
 						return ret;
 					}
 
-					fclose(img_fp);
 					rd = criu_render_node__unpack(NULL, img_size, buf);
 					num_handles += rd->num_of_bos;
 					criu_render_node__free_unpacked(rd, NULL);
