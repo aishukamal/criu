@@ -120,6 +120,7 @@ int amdgpu_plugin_dmabuf_restore(int id)
 	}
 
 	ret = read_fp(img_fp, buf, img_size);
+	fclose(img_fp);
 	if (ret) {
 		pr_perror("Unable to read from %s", path);
 		xfree(buf);
@@ -130,10 +131,8 @@ int amdgpu_plugin_dmabuf_restore(int id)
 	if (rd == NULL) {
 		pr_perror("Unable to parse the dmabuf message %d", id);
 		xfree(buf);
-		fclose(img_fp);
 		return -1;
 	}
-	fclose(img_fp);
 
 	/* Match GEM handle with shared_dmabuf list */
 	fd_id = amdgpu_id_for_handle(rd->gem_handle);
