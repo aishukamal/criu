@@ -551,7 +551,7 @@ void free_and_unmap(uint64_t size, amdgpu_bo_handle h_bo, amdgpu_va_handle h_va,
 	amdgpu_bo_free(h_bo);
 }
 
-int sdma_copy_bo(int shared_fd, uint64_t size, FILE *storage_fp,
+int sdma_copy_bo(int shared_fd, uint64_t size, int storage_fd,
 		 void *buffer, size_t buffer_size, amdgpu_device_handle h_dev,
 		 uint64_t max_copy_size, enum sdma_op_type type, bool do_not_free)
 {
@@ -676,7 +676,8 @@ int sdma_copy_bo(int shared_fd, uint64_t size, FILE *storage_fp,
 		memset(ib, 0, packets_per_buffer * 28);
 
 		if (type == SDMA_OP_VRAM_WRITE) {
-			err = read_fp(storage_fp, buffer, min(bytes_remain, buffer_bo_size));
+			err = img_read(storage_fd, buffer,
+				       min(bytes_remain, buffer_bo_size));
 			if (err) {
 				pr_perror("failed to read from storage");
 				goto err_bo_list;
@@ -752,7 +753,8 @@ int sdma_copy_bo(int shared_fd, uint64_t size, FILE *storage_fp,
 		}
 
 		if (type == SDMA_OP_VRAM_READ) {
-			err = write_fp(storage_fp, buffer, buffer_bo_size - buffer_space_remain);
+			err = img_write(storage_fd, buffer,
+					buffer_bo_size - buffer_space_remain);
 			if (err) {
 				pr_perror("failed to write out to storage");
 				goto err_cs_submit_ib;
@@ -804,11 +806,11 @@ void *dump_bo_contents(void *_thread_data)
 	struct amdgpu_gpu_info gpu_info = { 0 };
 	amdgpu_device_handle h_dev;
 	size_t max_bo_size = 0, image_size = 0, buffer_size;
+	int bo_contents_fd = -1;
 	uint64_t max_copy_size;
 	uint32_t major, minor;
 	int num_bos = 0;
 	int i, ret = 0;
-	FILE *bo_contents_fp = NULL;
 	void *buffer = NULL;
 	char img_path[40];
 
@@ -849,10 +851,9 @@ void *dump_bo_contents(void *_thread_data)
 	}
 
 	snprintf(img_path, sizeof(img_path), IMG_KFD_PAGES_FILE, thread_data->id, thread_data->gpu_id);
-	bo_contents_fp = open_img_file(img_path, true, &image_size, true);
-	if (!bo_contents_fp) {
-		pr_perror("Cannot fopen %s", img_path);
-		ret = -EIO;
+	bo_contents_fd = open_img_file(img_path, true, &image_size, true);
+	if (bo_contents_fd < 0) {
+		ret = bo_contents_fd;
 		goto exit;
 	}
 
@@ -866,8 +867,9 @@ void *dump_bo_contents(void *_thread_data)
 		num_bos++;
 
 		/* perform sDMA based vram copy */
-		ret = sdma_copy_bo(bo_buckets[i].dmabuf_fd, bo_buckets[i].size, bo_contents_fp, buffer, buffer_size, h_dev, max_copy_size,
-				   SDMA_OP_VRAM_READ, false);
+		ret = sdma_copy_bo(bo_buckets[i].dmabuf_fd, bo_buckets[i].size,
+				   bo_contents_fd, buffer, buffer_size, h_dev,
+				   max_copy_size, SDMA_OP_VRAM_READ, false);
 
 		if (ret) {
 			pr_err("Failed to drain the BO using sDMA: bo_buckets[%d]\n", i);
@@ -878,8 +880,8 @@ void *dump_bo_contents(void *_thread_data)
 exit:
 	pr_info("Thread[0x%x] done num_bos:%d ret:%d\n", thread_data->gpu_id, num_bos, ret);
 
-	if (bo_contents_fp)
-		fclose(bo_contents_fp);
+	if (bo_contents_fd >= 0)
+		close(bo_contents_fd);
 
 	xfree(buffer);
 
@@ -896,9 +898,9 @@ void *restore_bo_contents(void *_thread_data)
 	size_t image_size = 0, total_bo_size = 0, max_bo_size = 0, buffer_size;
 	struct amdgpu_gpu_info gpu_info = { 0 };
 	amdgpu_device_handle h_dev;
+	int bo_contents_fd = -1;
 	uint64_t max_copy_size;
 	uint32_t major, minor;
-	FILE *bo_contents_fp = NULL;
 	void *buffer = NULL;
 	char img_path[40];
 	int num_bos = 0;
@@ -922,10 +924,9 @@ void *restore_bo_contents(void *_thread_data)
 								   SDMA_LINEAR_COPY_MAX_SIZE - 1;
 
 	snprintf(img_path, sizeof(img_path), IMG_KFD_PAGES_FILE, thread_data->id, thread_data->gpu_id);
-	bo_contents_fp = open_img_file(img_path, false, &image_size, true);
-	if (!bo_contents_fp) {
-		pr_perror("Cannot fopen %s", img_path);
-		ret = -errno;
+	bo_contents_fd = open_img_file(img_path, false, &image_size, true);
+	if (bo_contents_fd < 0) {
+		ret = bo_contents_fd;
 		goto exit;
 	}
 
@@ -965,8 +966,9 @@ void *restore_bo_contents(void *_thread_data)
 
 		num_bos++;
 
-		ret = sdma_copy_bo(bo_buckets[i].dmabuf_fd, bo_buckets[i].size, bo_contents_fp, buffer, buffer_size, h_dev, max_copy_size,
-				   SDMA_OP_VRAM_WRITE, false);
+		ret = sdma_copy_bo(bo_buckets[i].dmabuf_fd, bo_buckets[i].size,
+				   bo_contents_fd, buffer, buffer_size, h_dev,
+				   max_copy_size, SDMA_OP_VRAM_WRITE, false);
 		if (ret) {
 			pr_err("Failed to fill the BO using sDMA: bo_buckets[%d]\n", i);
 			break;
@@ -976,8 +978,8 @@ void *restore_bo_contents(void *_thread_data)
 exit:
 	pr_info("Thread[0x%x] done num_bos:%d ret:%d\n", thread_data->gpu_id, num_bos, ret);
 
-	if (bo_contents_fp)
-		fclose(bo_contents_fp);
+	if (bo_contents_fd >= 0)
+		close(bo_contents_fd);
 
 	xfree(buffer);
 
@@ -1001,9 +1003,7 @@ int check_hsakmt_shared_mem(uint64_t *shared_mem_size, uint32_t *shared_mem_magi
 
 	/* First 4 bytes of shared file is the magic */
 	ret = read_file(HSAKMT_SHM_PATH, shared_mem_magic, sizeof(*shared_mem_magic));
-	if (ret)
-		pr_perror("Failed to read shared mem magic");
-	else
+	if (!ret)
 		pr_debug("Shared mem magic:0x%x\n", *shared_mem_magic);
 
 	return 0;
@@ -1122,15 +1122,12 @@ int amdgpu_id_for_handle(int handle)
 static int load_img(char *filename, unsigned char **out_buf, size_t *out_len)
 {
 	unsigned char *buf;
-	FILE *img_fp;
+	int fd, ret;
 	size_t len;
-	int ret;
 
-	img_fp = open_img_file(filename, false, &len, true);
-	if (!img_fp) {
-		ret = -ENOENT;
-		goto out;
-	}
+	fd = open_img_file(filename, false, &len, true);
+	if (fd < 0)
+		return fd;
 
 	buf = xmalloc(len);
 	if (!buf) {
@@ -1138,7 +1135,7 @@ static int load_img(char *filename, unsigned char **out_buf, size_t *out_len)
 		goto out_close;
 	}
 
-	ret = read_fp(img_fp, buf, len);
+	ret = img_read(fd, buf, len);
 	if (ret) {
 		xfree(buf);
 	} else {
@@ -1147,11 +1144,7 @@ static int load_img(char *filename, unsigned char **out_buf, size_t *out_len)
 	}
 
 out_close:
-	fclose(img_fp);
-out:
-	if (ret < 0)
-		pr_err("Unable to read from %s", filename);
-
+	close(fd);
 	return ret;
 }
 
@@ -1944,7 +1937,7 @@ int amdgpu_plugin_restore_file(int id, bool *retry_needed)
 	CriuKfd *e = NULL;
 	struct kfd_ioctl_criu_args args = { 0 };
 	size_t img_size;
-	FILE *img_fp = NULL;
+	int img_fd;
 
 	*retry_needed = false;
 
@@ -1955,8 +1948,8 @@ int amdgpu_plugin_restore_file(int id, bool *retry_needed)
 
 	snprintf(img_path, sizeof(img_path), IMG_KFD_FILE, id);
 
-	img_fp = open_img_file(img_path, false, &img_size, false);
-	if (!img_fp)
+	img_fd = open_img_file(img_path, false, &img_size, false);
+	if (img_fd < 0)
 		return amdgpu_plugin_restore_drm_file(id, retry_needed);
 
 	fd = open(AMDGPU_KFD_DEVICE, O_RDWR | O_CLOEXEC);
@@ -1973,19 +1966,18 @@ int amdgpu_plugin_restore_file(int id, bool *retry_needed)
 	pr_info("KFD Image file size:%ld\n", img_size);
 	buf = xmalloc(img_size);
 	if (!buf) {
-		fclose(img_fp);
+		close(img_fd);
 		return -ENOMEM;
 	}
 
-	ret = read_fp(img_fp, buf, img_size);
+	ret = img_read(img_fd, buf, img_size);
+	close(img_fd);
 	if (ret) {
 		pr_perror("Unable to read from %s", img_path);
-		fclose(img_fp);
 		xfree(buf);
 		return ret;
 	}
 
-	fclose(img_fp);
 	e = criu_kfd__unpack(NULL, img_size, buf);
 	if (e == NULL) {
 		pr_err("Unable to parse the KFD message %#x\n", id);
@@ -2237,25 +2229,23 @@ err:
 	return ret;
 }
 
-FILE *get_bo_contents_fp(int id, int gpu_id, size_t tot_size)
+static int get_bo_contents_fd(int id, int gpu_id, size_t tot_size)
 {
 	char img_path[PATH_MAX];
 	size_t image_size = 0;
-	FILE *bo_contents_fp = NULL;
+	int fd;
 
 	snprintf(img_path, sizeof(img_path), IMG_KFD_PAGES_FILE, id, gpu_id);
-	bo_contents_fp = open_img_file(img_path, false, &image_size, true);
-	if (!bo_contents_fp) {
-		pr_perror("Cannot fopen %s", img_path);
-		return NULL;
-	}
+	fd = open_img_file(img_path, false, &image_size, true);
+	if (fd < 0)
+		return fd;
 
 	if (tot_size != image_size) {
 		pr_err("%s size mismatch (current:%ld:expected:%ld)\n", img_path, image_size, tot_size);
-		fclose(bo_contents_fp);
-		return NULL;
+		close(fd);
+		return -EINVAL;
 	}
-	return bo_contents_fp;
+	return fd;
 }
 
 struct parallel_thread_data {
@@ -2272,7 +2262,7 @@ void *parallel_restore_bo_contents(void *_thread_data)
 	amdgpu_device_handle h_dev;
 	uint64_t max_copy_size;
 	size_t total_bo_size = 0, max_bo_size = 0, buffer_size = 0;
-	FILE *bo_contents_fp = NULL;
+	int bo_contents_fd = -1;
 	parallel_restore_entry *entry;
 	parallel_restore_cmd *restore_cmd = thread_data->restore_cmd;
 	int ret = 0;
@@ -2293,12 +2283,12 @@ void *parallel_restore_bo_contents(void *_thread_data)
 
 	buffer_size = kfd_max_buffer_size > 0 ? min(kfd_max_buffer_size, max_bo_size) : max_bo_size;
 
-	bo_contents_fp = get_bo_contents_fp(restore_cmd->cmd_head.id, thread_data->gpu_id, total_bo_size);
-	if (bo_contents_fp == NULL) {
-		ret = -1;
+	bo_contents_fd = get_bo_contents_fd(restore_cmd->cmd_head.id, thread_data->gpu_id, total_bo_size);
+	if (bo_contents_fd < 0) {
+		ret = bo_contents_fd;
 		goto err_sdma;
 	}
-	offset = ftell(bo_contents_fp);
+	offset = lseek(bo_contents_fd, 0, SEEK_CUR);
 	if (offset < 0) {
 		ret = -errno;
 		pr_perror("Failed to alloc aligned memory. Consider setting KFD_MAX_BUFFER_SIZE.");
@@ -2318,17 +2308,17 @@ void *parallel_restore_bo_contents(void *_thread_data)
 			continue;
 
 		entry = &restore_cmd->entries[i];
-		ret = fseeko(bo_contents_fp, entry->read_offset + offset,
-			     SEEK_SET);
-		if (ret < 0) {
+		ret = lseek(bo_contents_fd, entry->read_offset + offset,
+			    SEEK_SET);
+		if (ret) {
 			ret = -errno;
 			pr_err("Failed to seek for BO using sDMA: bo_buckets[%d]\n", i);
 			goto err_sdma;
 		}
-		ret = sdma_copy_bo(restore_cmd->fds_write[entry->write_id], entry->size, bo_contents_fp,
-				   buffer, buffer_size, h_dev,
-				   max_copy_size, SDMA_OP_VRAM_WRITE, false);
-
+		ret = sdma_copy_bo(restore_cmd->fds_write[entry->write_id],
+				   entry->size, bo_contents_fd, buffer,
+				   buffer_size, h_dev, max_copy_size,
+				   SDMA_OP_VRAM_WRITE, false);
 		if (ret) {
 			pr_err("Failed to fill the BO using sDMA: bo_buckets[%d]\n", i);
 			goto err_sdma;
@@ -2336,8 +2326,8 @@ void *parallel_restore_bo_contents(void *_thread_data)
 	}
 
 err_sdma:
-	if (bo_contents_fp)
-		fclose(bo_contents_fp);
+	if (bo_contents_fd >= 0)
+		close(bo_contents_fd);
 	if (buffer)
 		xfree(buffer);
 	amdgpu_device_deinitialize(h_dev);

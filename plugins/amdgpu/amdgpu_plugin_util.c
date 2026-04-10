@@ -196,26 +196,38 @@ void clear_dumped_fds()
 	}
 }
 
-int read_fp(FILE *fp, void *buf, const size_t buf_len)
+int img_read(int fd, void *buf, const size_t buf_len)
 {
-	size_t len_read;
+	ssize_t len;
 
-	len_read = fread(buf, 1, buf_len, fp);
-	if (len_read != buf_len) {
-		pr_err("Unable to read file (read:%ld buf_len:%ld)\n", len_read, buf_len);
-		return -EIO;
+	len = read(fd, buf, buf_len);
+	if (len < 0 || len != buf_len) {
+		int ret;
+
+		if (len >= 0)
+			errno = EIO;
+		ret = -errno;
+		pr_perror("Unable to read file (read:%ld buf_len:%ld)",
+			  len, buf_len);
+		return ret;
 	}
 	return 0;
 }
 
-int write_fp(FILE *fp, const void *buf, const size_t buf_len)
+int img_write(int fd, const void *buf, const size_t buf_len)
 {
-	size_t len_write;
+	ssize_t len;
 
-	len_write = fwrite(buf, 1, buf_len, fp);
-	if (len_write != buf_len) {
-		pr_err("Unable to write file (wrote:%ld buf_len:%ld)\n", len_write, buf_len);
-		return -EIO;
+	len = write(fd, buf, buf_len);
+	if (len < 0 || len != buf_len) {
+		int ret;
+
+		if (len >= 0)
+			errno = EIO;
+		ret = -errno;
+		pr_perror("Unable to write file (wrote:%ld buf_len:%ld)",
+			  len, buf_len);
+		return ret;
 	}
 	return 0;
 }
@@ -226,67 +238,63 @@ int write_fp(FILE *fp, const void *buf, const size_t buf_len)
  * We store the size of the actual contents in the first 8-bytes of
  * the file. This allows us to determine the file size when using
  * criu_image_streamer when fseek and fstat are not available. The
- * FILE * returned is already at the location of the first actual
+ * file descriptor returned is already at the location of the first actual
  * contents.
  *
  * @param path The file path
  * @param write False for read, true for write
  * @param size Size of actual contents
  * @param expect_present If true, the file not existing is an error
- * @return FILE *if successful, NULL if failed
+ * @return file descriptor if successful, -errno on failure
  */
-FILE *open_img_file(char *path, bool write, size_t *size, bool expect_present)
+int open_img_file(char *path, bool write, size_t *size, bool expect_present)
 {
-	FILE *fp = NULL;
 	int fd, ret;
 
-	if (opts.stream)
+	if (opts.stream) {
 		fd = img_streamer_open(path, write ? O_DUMP : O_RSTR);
-	else
-		fd = openat(criu_get_image_dir(), path, write ? (O_WRONLY | O_CREAT) : O_RDONLY, 0600);
-
-	if (fd < 0) {
-		if (expect_present)
-			pr_err("%s: Failed to open for %s\n", path, write ? "write" : "read");
-		return NULL;
+		if (fd < 0)
+			errno = -fd;
+	} else {
+		fd = openat(criu_get_image_dir(), path,
+			    write ? (O_WRONLY | O_CREAT) : O_RDONLY, 0600);
 	}
 
-	fp = fdopen(fd, write ? "w" : "r");
-	if (!fp) {
-		pr_err("%s: Failed get pointer for %s\n", path, write ? "write" : "read");
-		close(fd);
-		return NULL;
+	if (fd < 0) {
+		fd = -errno;
+		if (expect_present)
+			pr_perror("%s: Failed to open for %s",
+				  path, write ? "write" : "read");
+		return fd;
 	}
 
 	if (write)
-		ret = write_fp(fp, size, sizeof(*size));
+		ret = img_write(fd, size, sizeof(*size));
 	else
-		ret = read_fp(fp, size, sizeof(*size));
-
+		ret = img_read(fd, size, sizeof(*size));
 	if (ret) {
-		pr_err("%s:Failed to access file size\n", path);
-		fclose(fp);
-		errno = EIO;
-		return NULL;
+		close(fd);
+		return ret;
 	}
 
 	pr_debug("%s:Opened file for %s with size:%ld\n", path, write ? "write" : "read", *size);
-	return fp;
+	return fd;
 }
 
 int read_file(const char *file_path, void *buf, const size_t buf_len)
 {
-	int ret;
-	FILE *fp;
+	int ret, fd;
 
-	fp = fopen(file_path, "r");
-	if (!fp) {
-		pr_err("Cannot fopen %s\n", file_path);
-		return -errno;
+	fd = open(file_path, O_RDONLY);
+	if (fd < 0) {
+		int ret = -errno;
+
+		pr_perror("Cannot open %s", file_path);
+		return ret;
 	}
 
-	ret = read_fp(fp, buf, buf_len);
-	fclose(fp); /* this will also close fd */
+	ret = img_read(fd, buf, buf_len);
+	close(fd);
 	return ret;
 }
 
@@ -304,16 +312,15 @@ int read_file(const char *file_path, void *buf, const size_t buf_len)
  */
 int write_img_file(char *path, const void *buf, const size_t buf_len)
 {
-	int ret;
-	FILE *fp;
+	int ret, fd;
 	size_t len = buf_len;
 
-	fp = open_img_file(path, true, &len, true);
-	if (!fp)
-		return -errno;
+	fd = open_img_file(path, true, &len, true);
+	if (fd < 0)
+		return fd;
 
-	ret = write_fp(fp, buf, buf_len);
-	fclose(fp); /* this will also close fd */
+	ret = img_write(fd, buf, buf_len);
+	close(fd);
 	return ret;
 }
 
