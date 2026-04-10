@@ -1599,7 +1599,8 @@ static int restore_devices(struct kfd_ioctl_criu_args *args, CriuKfd *e)
 
 		drm_fd = node_get_drm_render_device(tp_node);
 		if (drm_fd < 0) {
-			pr_perror("Can't open drm render fd %d", tp_node->drm_render_minor);
+			pr_err("Can't open drm render fd for minor %d - %s",
+			       tp_node->drm_render_minor, strerror(-drm_fd));
 			goto exit;
 		} else {
 			pr_info("passing drm render fd = %d to driver\n", drm_fd);
@@ -1907,7 +1908,8 @@ int amdgpu_plugin_restore_file(int id, bool *retry_needed)
 
 		fd = node_get_drm_render_device(tp_node);
 		if (fd < 0) {
-			pr_err("Failed to open render device (minor:%d)\n", tp_node->drm_render_minor);
+			pr_err("Failed to open render device (minor:%d) - %s\n",
+			       tp_node->drm_render_minor, strerror(-fd));
 			return -1;
 		}
 
@@ -2201,9 +2203,8 @@ int init_dev(int dev_minor, amdgpu_device_handle *h_dev, uint64_t *max_copy_size
 	struct amdgpu_gpu_info gpu_info = { 0 };
 
 	drm_fd = open_drm_render_device(dev_minor);
-	if (drm_fd < 0) {
+	if (drm_fd < 0)
 		return drm_fd;
-	}
 
 	ret = amdgpu_device_initialize(drm_fd, &major, &minor, h_dev);
 	if (ret) {
