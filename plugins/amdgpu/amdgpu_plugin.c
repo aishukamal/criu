@@ -2300,6 +2300,11 @@ void *parallel_restore_bo_contents(void *_thread_data)
 		goto err_sdma;
 	}
 	offset = ftell(bo_contents_fp);
+	if (offset < 0) {
+		ret = -errno;
+		pr_perror("Failed to alloc aligned memory. Consider setting KFD_MAX_BUFFER_SIZE.");
+		goto err_sdma;
+	}
 
 	ret = posix_memalign(&buffer, sysconf(_SC_PAGE_SIZE), buffer_size);
 	if (ret) {
@@ -2314,7 +2319,13 @@ void *parallel_restore_bo_contents(void *_thread_data)
 			continue;
 
 		entry = &restore_cmd->entries[i];
-		fseeko(bo_contents_fp, entry->read_offset + offset, SEEK_SET);
+		ret = fseeko(bo_contents_fp, entry->read_offset + offset,
+			     SEEK_SET);
+		if (ret < 0) {
+			ret = -errno;
+			pr_err("Failed to seek for BO using sDMA: bo_buckets[%d]\n", i);
+			goto err_sdma;
+		}
 		ret = sdma_copy_bo(restore_cmd->fds_write[entry->write_id], entry->size, bo_contents_fp,
 				   buffer, buffer_size, h_dev,
 				   max_copy_size, SDMA_OP_VRAM_WRITE, false);
