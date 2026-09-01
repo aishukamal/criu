@@ -2,26 +2,25 @@ Checkpoint and Restore for TPU applications with CRIU
 ======================================================
 
 # Requirements
-The tpucheckpoint utility should be placed somewhere in your $PATH, and the
-workload's TPU runtime must support the tpu_control checkpoint/restore
+The workload's TPU runtime must support the tpu_control checkpoint/restore
 protocol. The plugin detects support by the presence of the libtpu control
 thread in the workload process.
 
-## tpucheckpoint
-The tpucheckpoint utility lives in the gVisor tree:
-https://github.com/google/gvisor/tree/master/tools/tpucheckpoint
+# Control Protocol
+libtpu advertises its control channel by naming a thread
+"libtpu{XXXXYYYY}" in the workload process, where the 8-character hex
+suffix encodes the request-write and response-read pipe FD numbers. The
+plugin discovers this thread by scanning /proc/<pid>/task/*/comm and
+exchanges length-delimited protobuf control messages over the pipes,
+accessed via /proc/<pid>/fd/.
 
-tpucheckpoint is a binary utility used to issue checkpointing commands to
-TPU applications. It speaks the libtpu control protocol
-(pkg/sentry/control/tpu_control.proto in gVisor): libtpu spawns a control
-thread named "libtpu{XXXXYYYY}" in the workload process, where the
-8-character hex suffix encodes the request/response pipe FD numbers, and
-tpucheckpoint discovers this thread via /proc and exchanges
-length-delimited protobuf messages over the pipes.
+The canonical schema for the control messages is
+pkg/sentry/control/tpu_control.proto in the gVisor tree:
+https://github.com/google/gvisor
 
 # Checkpointing Procedure
-tpucheckpoint exposes 2 actions used in the checkpointing process:
-checkpoint, restore.
+The plugin issues 2 actions in the checkpointing process: checkpoint,
+restore.
 
 * checkpoint - Used with the CHECKPOINT_DEVICES hook once a process has been
   seized/frozen to perform the actual checkpointing operation. libtpu moves
